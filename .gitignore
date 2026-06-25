@@ -7,3 +7,4 @@
 # OS
 .DS_Store
 Thumbs.db
+container-from-scratch/rootfs/
