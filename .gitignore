@@ -8,3 +8,5 @@
 .DS_Store
 Thumbs.db
 container-from-scratch/rootfs/
+container-from-scratch/rootfs.tar.gz
+container-from-scratch/rootfs/
