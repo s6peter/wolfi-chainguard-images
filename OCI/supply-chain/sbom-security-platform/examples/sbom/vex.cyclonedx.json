@@ -1,0 +1,33 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:REPLACE-WITH-GENERATED-UUID",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-07-22T00:00:00Z",
+    "component": {
+      "type": "container",
+      "name": "payments-api",
+      "version": "1.4.2",
+      "purl": "pkg:oci/payments-api@sha256:REPLACE_WITH_REAL_DIGEST"
+    }
+  },
+  "vulnerabilities": [
+    {
+      "id": "CVE-2026-EXAMPLE",
+      "source": { "name": "NVD", "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-EXAMPLE" },
+      "ratings": [
+        { "severity": "critical", "method": "CVSSv31", "score": 9.8 }
+      ],
+      "affects": [
+        { "ref": "pkg:maven/com.fasterxml.jackson.core/jackson-databind@2.16.1" }
+      ],
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "detail": "The vulnerable deserialization path is never invoked; polymorphic typing is disabled and no untrusted input reaches ObjectMapper.readValue with default typing.",
+        "response": [ "will_not_fix" ]
+      }
+    }
+  ]
+}

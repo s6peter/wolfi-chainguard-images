@@ -1,0 +1,87 @@
+# OPA Gatekeeper equivalent of the workload-hardening rules, for orgs that
+# standardize on Gatekeeper instead of Kyverno.
+#
+# Two parts: a ConstraintTemplate (the Rego logic) and Constraints (where it
+# applies). Roll out enforcementAction: dryrun -> deny.
+#
+# Docs: https://open-policy-agent.github.io/gatekeeper/
+
+---
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8shardenedworkload
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sHardenedWorkload
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedRegistries:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8shardenedworkload
+
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          not c.securityContext.readOnlyRootFilesystem == true
+          msg := sprintf("container %v must set readOnlyRootFilesystem: true", [c.name])
+        }
+
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          not c.securityContext.allowPrivilegeEscalation == false
+          msg := sprintf("container %v must set allowPrivilegeEscalation: false", [c.name])
+        }
+
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          not dropsAll(c)
+          msg := sprintf("container %v must drop ALL capabilities", [c.name])
+        }
+        dropsAll(c) { c.securityContext.capabilities.drop[_] == "ALL" }
+
+        violation[{"msg": msg}] {
+          not input.review.object.spec.securityContext.runAsNonRoot == true
+          msg := "pod must set runAsNonRoot: true"
+        }
+
+        # Image must be from an allowed registry AND pinned by digest.
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          not allowedRegistry(c.image)
+          msg := sprintf("container %v image %v not from an allowed registry", [c.name, c.image])
+        }
+        allowedRegistry(image) {
+          reg := input.parameters.allowedRegistries[_]
+          startswith(image, reg)
+        }
+
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          not contains(c.image, "@sha256:")
+          msg := sprintf("container %v image %v must be referenced by digest", [c.name, c.image])
+        }
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sHardenedWorkload
+metadata:
+  name: hardened-workload-baseline
+spec:
+  enforcementAction: deny        # start as dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["prod", "staging"]
+  parameters:
+    allowedRegistries:
+      - "registry.acme.internal/"

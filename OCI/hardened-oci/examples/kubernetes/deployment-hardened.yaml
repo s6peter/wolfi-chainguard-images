@@ -1,0 +1,75 @@
+# A fully hardened Deployment that satisfies the program end to end.
+#
+# - image referenced by DIGEST from the approved registry (verified at admission)
+# - runs non-root, numeric UID
+# - read-only root filesystem (writable scratch via emptyDir)
+# - all capabilities dropped, no privilege escalation, seccomp RuntimeDefault
+# - resource requests/limits set
+# - no host namespaces, no privileged, no hostPath
+#
+# Passes: Pod Security "restricted", kyverno-require-non-root, and (once signed)
+# kyverno-verify-images / the Gatekeeper constraint.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: prod
+  labels: { app: payments-api }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: payments-api }
+  template:
+    metadata:
+      labels: { app: payments-api }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payments-api
+          # Deploy by DIGEST — never a mutable tag. Replace with a real digest.
+          image: registry.acme.internal/payments-api@sha256:REPLACE_WITH_REAL_DIGEST
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8443
+              name: https
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "500m", memory: "256Mi" }
+          # Writable scratch space, since the root fs is read-only.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet: { path: /healthz, port: https, scheme: HTTPS }
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet: { path: /readyz, port: https, scheme: HTTPS }
+            initialDelaySeconds: 5
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Default-deny NetworkPolicy for the namespace (least-privilege east-west).
+# Add explicit allow rules for the flows this workload actually needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: prod
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]

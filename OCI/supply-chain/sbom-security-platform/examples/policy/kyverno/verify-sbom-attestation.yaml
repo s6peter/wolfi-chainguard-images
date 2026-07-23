@@ -1,0 +1,49 @@
+# Kyverno: require a signed image AND a verifiable SBOM attestation (docs/05).
+# Verifies locally with cosign keyless — works even if the platform is down.
+#
+# Roll out validationFailureAction: Audit -> Enforce.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-sbom-and-provenance
+  annotations:
+    policies.kyverno.io/title: Require signed image + SBOM + SLSA provenance
+spec:
+  validationFailureAction: Enforce      # start as Audit
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail                    # fail closed on trust
+  background: false
+  rules:
+    - name: verify-signature-sbom-provenance
+      match:
+        any:
+          - resources: { kinds: [Pod] }
+      verifyImages:
+        - imageReferences:
+            - "registry.acme.internal/*"
+          # 1) Signature from the expected CI identity.
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "https://github.com/acme/*/.github/workflows/release.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          # 2) A CycloneDX SBOM attestation must be present, same identity.
+          attestations:
+            - type: https://cyclonedx.org/bom
+              attestors:
+                - entries:
+                    - keyless:
+                        subject: "https://github.com/acme/*/.github/workflows/*"
+                        issuer: "https://token.actions.githubusercontent.com"
+            # 3) SLSA provenance attestation must be present.
+            - type: https://slsa.dev/provenance/v1
+              attestors:
+                - entries:
+                    - keyless:
+                        subject: "https://github.com/acme/*/.github/workflows/*"
+                        issuer: "https://token.actions.githubusercontent.com"
+          mutateDigest: true            # pin tag -> digest
+          required: true

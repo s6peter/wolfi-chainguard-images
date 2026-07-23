@@ -1,0 +1,41 @@
+# Pod Security Standards — enforce "restricted" on application namespaces.
+#
+# The native Kubernetes baseline (no extra controller required). Layer
+# Kyverno/OPA on top for image-signature verification and org-specific rules.
+#
+# Docs: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    # Block anything that violates "restricted" at admission.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    # Also warn + audit so violations are visible in logs/UX.
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# System/infra namespaces that legitimately need more privilege should be
+# explicitly labeled (e.g. baseline/privileged) rather than left unlabeled.
+# Keep this list short and reviewed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-infra
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: baseline

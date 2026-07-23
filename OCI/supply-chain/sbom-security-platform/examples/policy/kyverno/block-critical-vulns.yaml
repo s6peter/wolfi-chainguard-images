@@ -1,0 +1,50 @@
+# Kyverno: block deploy when the platform's live vuln verdict is "fail"
+# (docs/05 §3, platform-backed policy with graceful degradation).
+#
+# This calls the SBOM platform's policy API at admission for a fresh verdict.
+# Pair with verify-sbom-attestation.yaml, which handles trust LOCALLY so a
+# platform outage never lets an UNSIGNED image through.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: block-critical-vulnerabilities
+  annotations:
+    policies.kyverno.io/title: Block images failing the platform vuln verdict
+spec:
+  validationFailureAction: Enforce      # start as Audit
+  failurePolicy: Ignore                 # DEGRADE ON FRESHNESS: if the API call
+                                        # itself fails, don't block all deploys —
+                                        # trust is still enforced by the signature
+                                        # policy. Fail closed on trust, degrade on
+                                        # freshness (docs/05 §3).
+  background: false
+  rules:
+    - name: query-platform-verdict
+      match:
+        any:
+          - resources: { kinds: [Pod] }
+      context:
+        # Query the platform policy API for this image's verdict.
+        - name: verdict
+          apiCall:
+            method: GET
+            # {{ }} is resolved by Kyverno from the admission request.
+            service:
+              url: "https://sbom-platform.acme.internal/api/v1/verdict"
+              caBundle: |
+                -----BEGIN CERTIFICATE-----
+                REPLACE_WITH_PLATFORM_CA
+                -----END CERTIFICATE-----
+            # Pass the image ref; the platform returns {"decision":"pass|fail", ...}
+            data:
+              - key: image
+                value: "{{ request.object.spec.containers[0].image }}"
+      validate:
+        message: "Image failed the SBOM platform vulnerability/policy verdict (un-waived Critical/High or license violation)."
+        deny:
+          conditions:
+            any:
+              - key: "{{ verdict.decision }}"
+                operator: Equals
+                value: "fail"

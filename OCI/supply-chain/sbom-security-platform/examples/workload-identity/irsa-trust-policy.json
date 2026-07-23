@@ -1,0 +1,19 @@
+{
+  "_comment": "IRSA trust policy (docs/06 §3). Attach to the IAM role the SBOM platform's ingester pod assumes. The Condition pins the EXACT ServiceAccount so only that workload can assume the role. Replace ACCOUNT_ID, REGION, OIDC_ID, namespace, and SA name.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/oidc.eks.REGION.amazonaws.com/id/OIDC_ID"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.REGION.amazonaws.com/id/OIDC_ID:aud": "sts.amazonaws.com",
+          "oidc.eks.REGION.amazonaws.com/id/OIDC_ID:sub": "system:serviceaccount:sbom-platform:sbom-ingester"
+        }
+      }
+    }
+  ]
+}

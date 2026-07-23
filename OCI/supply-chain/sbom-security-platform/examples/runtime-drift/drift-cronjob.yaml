@@ -1,0 +1,61 @@
+# Scheduled runtime-drift reconciliation as a Kubernetes CronJob (docs/07 §5).
+# Samples running pods, compares each against its attested SBOM, and reports
+# drift findings back to the platform. Runs per cluster.
+#
+# This is a skeleton — the container image would wrap compare-running-vs-sbom.sh
+# plus logic to enumerate pods (via the K8s API) and POST findings to the platform.
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sbom-drift-reconciler
+  namespace: sbom-platform
+spec:
+  schedule: "0 */6 * * *"          # every 6h; rate-limit to avoid node load
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: sbom-drift-reader   # RBAC: read pods; IRSA/SPIFFE for platform auth
+          restartPolicy: Never
+          containers:
+            - name: reconciler
+              image: registry.acme.internal/sbom-drift-reconciler@sha256:REPLACE_WITH_REAL_DIGEST
+              args:
+                - "--platform-url=https://sbom-platform.acme.internal"
+                - "--sample-namespaces=prod,staging"
+                - "--report-findings=true"
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65532
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: "100m", memory: "256Mi" }
+                limits:   { cpu: "500m", memory: "512Mi" }
+---
+# Minimal RBAC: the reconciler only needs to READ pods to learn image digests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sbom-drift-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sbom-drift-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sbom-drift-reader
+subjects:
+  - kind: ServiceAccount
+    name: sbom-drift-reader
+    namespace: sbom-platform

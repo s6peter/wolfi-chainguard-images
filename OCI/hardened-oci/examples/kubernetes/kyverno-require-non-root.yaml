@@ -1,0 +1,72 @@
+# Kyverno: enforce workload hardening baseline + digest-only references.
+#
+# Complements Pod Security Standards "restricted" with the program's specific
+# rules. Roll out Audit -> Enforce.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: hardened-workload-baseline
+  annotations:
+    policies.kyverno.io/title: Hardened workload baseline
+spec:
+  validationFailureAction: Enforce      # start as Audit
+  background: true
+  failurePolicy: Fail
+  rules:
+    - name: require-non-root
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Containers must run as non-root."
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): true
+            containers:
+              - =(securityContext):
+                  runAsNonRoot: true
+
+    - name: require-readonly-rootfs-and-drop-caps
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Containers must use readOnlyRootFilesystem, drop ALL caps, and disable privilege escalation."
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  readOnlyRootFilesystem: true
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop: ["ALL"]
+
+    - name: require-seccomp
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Pods must set seccompProfile RuntimeDefault."
+        pattern:
+          spec:
+            securityContext:
+              seccompProfile:
+                type: RuntimeDefault
+
+    - name: disallow-latest-and-require-digest
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Images must be referenced by digest (no ':latest' / mutable tags)."
+        pattern:
+          spec:
+            containers:
+              # Require an @sha256 digest in every image reference.
+              - image: "*@sha256:*"

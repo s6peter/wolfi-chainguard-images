@@ -1,0 +1,64 @@
+# Kyverno: verify image signatures + attestations at admission (keyless cosign).
+#
+# The core trust gate. Rejects any image in the covered namespaces that is not
+# signed by the EXPECTED identity and does not carry the required attestations.
+#
+# Roll out as validationFailureAction: Audit first, then Enforce (docs/04 §1).
+#
+# Docs: https://kyverno.io/docs/writing-policies/verify-images/
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify hardened image signatures & provenance
+spec:
+  validationFailureAction: Enforce      # start as Audit, then switch to Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail                    # fail closed
+  rules:
+    - name: verify-signature-keyless
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      # Only images from the approved registry are considered; others are blocked
+      # by the separate allowed-registry rule below.
+      verifyImages:
+        - imageReferences:
+            - "registry.acme.internal/*"
+          attestors:
+            - entries:
+                # Keyless: pin the signer identity + OIDC issuer.
+                - keyless:
+                    subject: "https://github.com/acme/*/.github/workflows/release.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          # Require an SBOM attestation to be present and from the same identity.
+          attestations:
+            - type: https://spdx.dev/Document
+              attestors:
+                - entries:
+                    - keyless:
+                        subject: "https://github.com/acme/*/.github/workflows/*"
+                        issuer: "https://token.actions.githubusercontent.com"
+          mutateDigest: true       # rewrite tag -> resolved digest
+          required: true
+    - name: block-unapproved-registries
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        message: "Images must come from registry.acme.internal."
+        pattern:
+          spec:
+            =(initContainers):
+              - image: "registry.acme.internal/*"
+            =(ephemeralContainers):
+              - image: "registry.acme.internal/*"
+            containers:
+              - image: "registry.acme.internal/*"

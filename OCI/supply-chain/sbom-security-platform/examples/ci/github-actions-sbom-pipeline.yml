@@ -1,0 +1,73 @@
+# End-to-end producer pipeline: build -> SBOM -> sign+attest -> ingest.
+# The CI side of the SBOM Security Platform (docs/02, 04) using keyless cosign
+# and OIDC — no static signing key, no static platform API key.
+
+name: sbom-pipeline
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write            # OIDC for keyless signing AND platform auth
+
+env:
+  REGISTRY: registry.acme.internal
+  IMAGE: acme/payments-api
+
+jobs:
+  build-attest-ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: Build & push (by digest, with provenance + sbom)
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ github.sha }}
+          provenance: true          # SLSA provenance attestation
+          sbom: true
+
+      - name: Install tooling
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          curl -sSfL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+
+      - name: Resolve ref
+        run: echo "REF=${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_ENV"
+
+      - name: Generate CycloneDX SBOM
+        run: syft "$REF" -o cyclonedx-json > app.cyclonedx.json
+
+      - name: Sign + attest SBOM (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign "$REF"
+          cosign attest --predicate app.cyclonedx.json --type cyclonedx "$REF"
+
+      # Ingest into the platform using an OIDC token (NOT a static API key).
+      # The platform validates the token's identity claims to authorize the write.
+      - name: Ingest SBOM into platform
+        run: |
+          OIDC_TOKEN=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sbom-platform" | jq -r '.value')
+          curl -sSf -X POST "https://sbom-platform.acme.internal/api/v1/bom" \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"projectName\":\"payments-api\",\"projectVersion\":\"${{ github.sha }}\",\"autoCreate\":true,\"bom\":\"$(base64 -w0 app.cyclonedx.json)\"}"
+
+      # Clusters/admission later verify identity exactly as in
+      # examples/signing/verify-attestations.sh and examples/policy/.

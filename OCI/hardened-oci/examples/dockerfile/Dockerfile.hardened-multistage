@@ -1,0 +1,53 @@
+# Hardened multi-stage Dockerfile.
+#
+# The alternative to apko when you need a Dockerfile. Compile in a -dev stage
+# that HAS a toolchain; ship a distroless/scratch final stage that has NO shell,
+# NO package manager, and runs as a non-root numeric user.
+#
+# Two final-stage options are shown. Pick one.
+#
+# Build:
+#   docker build -f Dockerfile.hardened-multistage -t myapp:1.0.0 .
+#
+# NOTE: the digests below are PLACEHOLDERS. Resolve and pin real digests:
+#   crane digest cgr.dev/chainguard/go:latest
+
+# ---------- Build stage (has a toolchain; never shipped) ----------
+FROM cgr.dev/chainguard/go@sha256:REPLACE_WITH_REAL_DIGEST AS build
+WORKDIR /src
+
+# Cache dependencies first for faster rebuilds.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+# Static build: no libc dependency, so it can run on scratch.
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath -ldflags="-s -w" \
+      -o /out/myapp ./cmd/myapp
+
+# ---------- Option A: scratch (smallest; static binaries only) ----------
+FROM scratch AS runtime-scratch
+# Bring only what a network app needs: CA certs (+ tzdata if you use timezones).
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /out/myapp /usr/bin/myapp
+USER 65532:65532
+ENTRYPOINT ["/usr/bin/myapp"]
+
+# ---------- Option B: Chainguard distroless static (minimal, non-root) ----------
+# Use when you want a curated minimal base (certs, tzdata, nonroot user) without
+# a shell. Comment out Option A and build this target instead.
+FROM cgr.dev/chainguard/static@sha256:REPLACE_WITH_REAL_DIGEST AS runtime-distroless
+COPY --from=build /out/myapp /usr/bin/myapp
+# The chainguard/static image already defines the nonroot (65532) user.
+USER 65532:65532
+ENTRYPOINT ["/usr/bin/myapp"]
+
+# Build the target you want, e.g.:
+#   docker build --target runtime-distroless -t myapp:1.0.0 .
+#
+# Hardening properties of the final image:
+#   - no shell, no package manager, no compiler
+#   - non-root numeric user (65532)
+#   - designed to run with readOnlyRootFilesystem: true
+#   - pinned base by digest

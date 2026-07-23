@@ -1,0 +1,75 @@
+# OPA/Gatekeeper equivalent: require images be signed-by-digest from an approved
+# registry, and (via external data) carry a provenance attestation (docs/05).
+#
+# Signature/attestation cryptographic verification in Gatekeeper is typically
+# delegated to an external-data provider (e.g. ratify / cosign-gatekeeper). This
+# template enforces the structural rules and consults that provider's result.
+#
+# Roll out enforcementAction: dryrun -> deny.
+
+---
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequireprovenance
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireProvenance
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedRegistries:
+              type: array
+              items: { type: string }
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequireprovenance
+
+        # Must come from an allowed registry.
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          not allowed(c.image)
+          msg := sprintf("image %v not from an allowed registry", [c.image])
+        }
+        allowed(image) {
+          reg := input.parameters.allowedRegistries[_]
+          startswith(image, reg)
+        }
+
+        # Must be pinned by digest.
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          not contains(c.image, "@sha256:")
+          msg := sprintf("image %v must be referenced by digest", [c.image])
+        }
+
+        # External-data provider (ratify/cosign) must report verified provenance.
+        # `external_data` returns per-image verification results.
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          resp := external_data({"provider": "ratify-verifier", "keys": [c.image]})
+          item := resp.responses[_]
+          item[0] == c.image
+          not item[1].isSuccess
+          msg := sprintf("image %v failed signature/provenance verification", [c.image])
+        }
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireProvenance
+metadata:
+  name: require-provenance-prod
+spec:
+  enforcementAction: deny            # start as dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["prod", "staging"]
+  parameters:
+    allowedRegistries:
+      - "registry.acme.internal/"

@@ -1,0 +1,48 @@
+# Build your application into a signed apk package with melange, then include it
+# in an apko image (see ../apko/hardened-app.apko.yaml). melange + apko gives a
+# fully declarative, reproducible, SBOM-carrying build with no Dockerfile.
+#
+# Build the package:
+#   melange keygen                       # once: generates melange.rsa[.pub]
+#   melange build example-package.melange.yaml \
+#     --arch x86_64,aarch64 \
+#     --signing-key melange.rsa
+#
+# Output goes to ./packages/<arch>/myapp-1.0.0-r0.apk, signed with your key.
+# Reference that local repo + key from the apko config's repositories/keyring.
+
+package:
+  name: myapp
+  version: 1.0.0
+  epoch: 0
+  description: "Example hardened application package"
+  copyright:
+    - license: Apache-2.0
+  dependencies:
+    runtime:
+      # Runtime deps that must be present in the final image.
+      - ca-certificates-bundle
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      # Build-time toolchain — lives ONLY in the build environment, never the
+      # final image.
+      - build-base
+      - busybox
+      - go            # swap for your language toolchain
+
+pipeline:
+  # Example: build a static Go binary. Adapt to your language.
+  - name: build
+    runs: |
+      CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+        -o "${{targets.destdir}}/usr/bin/myapp" ./cmd/myapp
+  - name: strip
+    uses: strip
+
+# melange emits an SBOM for the package automatically.

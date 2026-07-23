@@ -1,0 +1,59 @@
+# Build → SBOM → scan → sign → attest, as a GitLab CI pipeline.
+#
+# Uses cosign keyless signing via GitLab's OIDC ID token (CI_JOB_JWT successor:
+# ID tokens). Adapt registry, image path, and severity policy to your org.
+
+stages: [build, scan, sign]
+
+variables:
+  IMAGE: "$CI_REGISTRY_IMAGE"
+  TAG: "$CI_COMMIT_SHORT_SHA"
+
+build:
+  stage: build
+  image: gcr.io/kaniko-project/executor:v1.23.2-debug
+  script:
+    # Kaniko builds without a Docker daemon. Point at the hardened Dockerfile.
+    - /kaniko/executor
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/examples/dockerfile/Dockerfile.hardened-multistage"
+      --target runtime-distroless
+      --destination "$IMAGE:$TAG"
+      --digest-file /digest.txt
+    - cp /digest.txt digest.txt
+  artifacts:
+    paths: [digest.txt]
+
+scan:
+  stage: scan
+  image:
+    name: anchore/grype:latest
+    entrypoint: [""]
+  script:
+    - DIGEST=$(cat digest.txt)
+    # Fail the pipeline on Critical/High. --fail-on sets the exit-code threshold.
+    - grype "$IMAGE@$DIGEST" --fail-on high -o table
+  needs: [build]
+
+sign-attest:
+  stage: sign
+  image: bitnami/cosign:latest    # or install cosign in your own image
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  variables:
+    COSIGN_YES: "true"
+  script:
+    - DIGEST=$(cat digest.txt)
+    - REF="$IMAGE@$DIGEST"
+    # Keyless signing using the GitLab-issued OIDC token.
+    - cosign sign "$REF"
+    # (Generate SBOM in a prior step with syft and attest it here.)
+    # - cosign attest --predicate sbom.spdx.json --type spdxjson "$REF"
+  needs: [build, scan]
+
+# Verification (in cluster / downstream):
+#   cosign verify \
+#     --certificate-identity-regexp "https://gitlab.com/acme/.+" \
+#     --certificate-oidc-issuer https://gitlab.com \
+#     registry.gitlab.com/acme/payments-api@sha256:...
