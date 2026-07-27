@@ -13,12 +13,18 @@
 #             HITRUST 09.j/10.m, SOX ITGC change + access, FedRAMP CM-2/RA-5/
 #             SI-7/AU-11, NIST SP 800-190 s4.1-4.5, CIS Docker Benchmark s4.
 #
-# ACTION PINNING: third-party actions below are referenced by tag for
-# readability. Before this runs in a regulated environment they MUST be pinned
-# to a commit SHA (FedRAMP SR-3 / SLSA source integrity):
+# ACTION PINNING: third-party actions are pinned to commit SHAs, not tags.
+# A tag is mutable - whoever controls the action repo can repoint v4 at new
+# code, which would execute inside this workflow with its registry and signing
+# permissions. FedRAMP SR-3, SLSA source integrity, CIS Software Supply Chain 2.4.
 #
-#   gh api repos/actions/checkout/git/refs/tags/v4 --jq .object.sha
-#   # then: actions/checkout@<sha> # v4.2.2
+# The trailing comment records which release each SHA was, for readability.
+# To re-resolve (note: tags may be annotated, so deref to the commit):
+#   curl -s https://api.github.com/repos/actions/checkout/git/ref/tags/v4 | jq -r .object.sha
+#
+# Both actions have since released v7. Bumping is a separate, testable change -
+# v5+ changed the Node runtime and upload-artifact v5 changed behaviour, so do
+# not fold a version upgrade into a pinning commit.
 # =============================================================================
 name: golden-image
 
@@ -74,7 +80,7 @@ jobs:
       count: ${{ steps.build.outputs.count }}
       sha256: ${{ steps.build.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - id: build
         name: Build image matrix from catalogue
@@ -123,7 +129,7 @@ jobs:
       issues: write        # raise the page on gate failure
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # -- toolchain ---------------------------------------------------------
       - name: Install skopeo and jq
@@ -238,7 +244,7 @@ jobs:
       # export below. SOX 7yr / HIPAA 6yr / PCI 12mo / FedRAMP AU-11 3yr.
       - name: Upload evidence bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: evidence-${{ matrix.image.key }}-${{ github.run_id }}
           path: ${{ env.BASE_DIR }}/evidence/${{ matrix.image.key }}/**

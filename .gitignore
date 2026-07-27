@@ -1,12 +1,102 @@
-# IDE
+# =============================================================================
+# THIS FILE IS A SECURITY CONTROL, NOT AN OPTIMISATION.
+#
+# This repository is PUBLIC. A `git add -A` here was one command away from
+# committing three private cosign signing keys, a 1,014-file Python virtualenv,
+# and seven editor lock files to a public GitHub repo. The keys were untracked
+# but NOT ignored, which is the dangerous combination: invisible in `git status`
+# summaries, swept up by any bulk add.
+#
+# Verified 2026-07-27. Deny by default; allow explicitly.
+# =============================================================================
+
+# --- Signing keys and credentials --------------------------------------------
+# Nothing that can sign, authenticate, or decrypt belongs in git. A committed
+# key is compromised the moment it is pushed, and rewriting history does not
+# un-compromise it - the only remedy is rotation.
+# CIS Docker 4.10 | PCI-DSS 8.3.1 | NIST IA-5
+*.key
+cosign.key
+!cosign.pub
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+*.ppk
+
+# Tokens, PATs, and anything that looks like one
+env/
+*token*
+*.pat
+.netrc
+.npmrc
+.pypirc
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Cloud and cluster credentials
+.aws/
+.azure/
+.gcloud/
+.kube/config
+kubeconfig*
+
+# --- Language and tool caches ------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.npm/
+vendor/
+target/
+dist/
+build/
+*.egg-info/
+
+# --- Editor and OS noise -----------------------------------------------------
+# LibreOffice writes .~lock.<name># next to any open document.
+.~lock.*#
 .vscode/
 .idea/
 *.swp
+*.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
+.direnv/
+
+# --- Pipeline evidence -------------------------------------------------------
+# Evidence is staged locally then shipped to WORM storage. It must not live in
+# git: history is rewritable by anyone with force-push, which is precisely the
+# property evidence retention has to exclude. SOX, FedRAMP AU-11.
+**/evidence/**
+!**/evidence/.gitkeep
+
+# Scan output and SBOMs regenerated on every run
+trivy-report.json
+*.sbom.json
+
+# --- Large build artifacts ---------------------------------------------------
 container-from-scratch/rootfs/
 container-from-scratch/rootfs.tar.gz
-container-from-scratch/rootfs/
+*.tar.gz
+!**/testdata/**/*.tar.gz
+
+# NOTE: two compiled binaries are currently untracked and NOT ignored:
+#   hardened-oci/oras-learning-with-project/image-from-scratch/app         (~7 MB)
+#   hardened-oci/oras-learning-with-project/image-from-scratch/scratch-api (~5 MB)
+# Left alone deliberately - for a build-from-scratch exercise the static binary
+# may be the artifact under study. Decide whether they belong in git before any
+# bulk add; if not, add them here.
