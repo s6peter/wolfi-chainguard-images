@@ -23,10 +23,10 @@
 name: golden-image
 
 on:
-  schedule:
+  #schedule:
     # 02:00 UTC daily. Ingest runs nightly; consumer bump PRs are batched
     # weekly by Renovate so application teams see one PR, not seven.
-    - cron: '0 2 * * *'
+    #- cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       image_key:
