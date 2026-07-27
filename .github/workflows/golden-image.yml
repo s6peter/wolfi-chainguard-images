@@ -1,9 +1,15 @@
 # =============================================================================
 # Golden image pipeline
 #
-# Nightly ingest of approved upstream base images into the organisation's
-# quarantine mirror, verification, scanning, gating, and promotion to the
-# approved/ namespace with an organisation signature and attestations.
+# Ingest of approved upstream base images into the organisation's quarantine
+# mirror, verification, scanning, gating, and promotion to the approved/
+# namespace with an organisation signature and attestations.
+#
+# Triggers:
+#   push to main      real run - promotes, signs as @refs/heads/main
+#   pull_request      gates only, promotion redirected to dryrun/
+#   workflow_dispatch manual, with an optional dry_run input
+#   schedule          currently commented out; re-enable for nightly patching
 #
 # Source of truth:
 #   hardened-oci/oras-learning-with-project/image-cosign-kms-kyverno-slsa/
@@ -44,6 +50,17 @@ on:
         required: false
         type: boolean
         default: false
+  # Merging to main IS the trigger for a real run. A push event is neither a
+  # pull_request nor a dry_run dispatch, so the pipeline writes to the real
+  # mirror/ and approved/ namespaces and signs with @refs/heads/main - which is
+  # the identity the Kyverno policy is pinned to.
+  push:
+    branches: [main]
+    paths:
+      - 'hardened-oci/oras-learning-with-project/image-cosign-kms-kyverno-slsa/golden-image-04/**'
+      - '.github/workflows/golden-image.yml'
+  # Same paths on a PR, but promotion is redirected to a throwaway namespace so
+  # a pull request can never write to approved/.
   pull_request:
     paths:
       - 'hardened-oci/oras-learning-with-project/image-cosign-kms-kyverno-slsa/golden-image-04/**'
@@ -255,7 +272,7 @@ jobs:
       # storage layer, not by policy - an operator who can delete evidence
       # breaks the SOX control regardless of what the runbook says.
       # - name: Export evidence to WORM storage
-      #   if: always() && github.event_name == 'schedule'
+      #   if: always() && (github.event_name == 'schedule' || github.event_name == 'push')
       #   run: |
       #     aws s3 cp --recursive "$BASE_DIR/evidence/${{ matrix.image.key }}" \
       #       "s3://bank-golden-image-evidence/${{ matrix.image.key }}/" \
@@ -276,7 +293,7 @@ jobs:
       # A failed gate is an operational event, not a red tick nobody reads.
       # The issue is the durable record; the webhook is the interrupt.
       - name: Raise page (gate failure)
-        if: failure() && github.event_name == 'schedule'
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
