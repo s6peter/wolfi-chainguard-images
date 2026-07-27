@@ -1,0 +1,24 @@
+# Local overrides - may contain environment-specific registry and key refs.
+config/policy.local.env
+
+# Evidence is staged here then shipped to WORM storage. It must not be a git
+# artifact: git history is mutable by anyone with force-push, which is exactly
+# the property evidence retention has to exclude (SOX, FedRAMP AU-11).
+evidence/**
+!evidence/.gitkeep
+
+# Never. CIS Docker 4.10 / PCI-DSS 8.3.1.
+*.key
+!*.pub
+cosign.key
+
+# Plaintext credentials. Nothing under env/ is ever committable.
+# A token on disk is a finding regardless of gitignore - it belongs in the
+# runner's OIDC identity, a KMS reference, or a secret manager.
+env/
+*token*
+*.pat
+.netrc
+
+# LibreOffice / editor lock files
+.~lock.*#
