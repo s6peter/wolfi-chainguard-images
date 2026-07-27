@@ -1,0 +1,154 @@
+# =============================================================================
+# The deployment manifest, written to pass admission control on the first try.
+#
+# Every field below exists because a Kyverno policy checks it. Remove any one
+# and the pod is rejected at the cluster door - see the table in ../README.md.
+#
+# The image is pinned by digest, not tag. Kyverno would resolve a tag for you
+# (verifyDigest does that during verification), but then the digest lives only
+# in the cluster and never in this file - so a reviewer looking at this PR
+# cannot see which build they are approving. That is the SOX-relevant half, and
+# it is why scripts/check-manifests.sh gates it before merge instead.
+#
+# Verified against the real policies in a kind cluster - see
+# ../../golden-image-04/tests/admission-test.sh
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: example-app
+  labels:
+    # Pod Security Admission as a second, independent layer. Kyverno can be
+    # uninstalled or its webhook can fail open under load; PSA is built into
+    # the API server. Two mechanisms, one requirement.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    io.internal.data-classification: none
+    io.internal.owner: app-team
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example-api
+  namespace: example-app
+  labels:
+    app.kubernetes.io/name: example-api
+  annotations:
+    # Traceability back to the build. An assessor asks "what is running and
+    # where did it come from?" - these three answer it without asking the team.
+    io.internal.base-image: "ghcr.io/s6peter/approved/python@sha256:a0365f7b90bf"
+    io.internal.build-run: "REPLACED-BY-CI"
+    io.internal.vcs-ref: "REPLACED-BY-CI"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: example-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: example-api
+    spec:
+      automountServiceAccountToken: false   # nothing here talks to the API server
+
+      # --- pod-level securityContext: golden-image-runtime-hardening ---------
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532          # numeric, so the kubelet can verify it
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: app
+          # Digest-pinned. CI rewrites this line; do not hand-edit.
+          image: ghcr.io/s6peter/apps/example-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080   # above 1024, so NET_BIND_SERVICE is not needed
+
+          # --- container-level securityContext -----------------------------
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+
+          # readOnlyRootFilesystem is what makes "no package manager in the
+          # image" actually mean something. Without it an attacker can still
+          # drop tooling into a writable path and execute it. Give the app
+          # explicit emptyDir mounts for anything it genuinely writes.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+          # Kubernetes ignores the image's HEALTHCHECK entirely. These are the
+          # probes that actually run.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            failureThreshold: 20
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+
+          # SIGTERM reaches uvicorn as PID 1 (exec-form ENTRYPOINT), so
+          # in-flight requests drain and the audit log flushes before exit.
+          lifecycle:
+            preStop:
+              sleep: { seconds: 5 }
+
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-api
+  namespace: example-app
+spec:
+  selector:
+    app.kubernetes.io/name: example-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+# Default-deny egress. A container that cannot reach the internet cannot
+# exfiltrate, and cannot pull a second-stage payload. NIST SC-7.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: example-api-default-deny
+  namespace: example-app
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+  ingress:
+    - from:
+        - podSelector: {}

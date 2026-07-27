@@ -1,0 +1,61 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "_comment": [
+    "This is the answer to 'if you pin a digest, how do you ever get updates?'",
+    "You don't hand-edit the digest. A bot opens a one-line PR, CI runs, you",
+    "review a diff you can actually read. Same idea as package-lock.json:",
+    "pinning does not mean frozen, it means updates are deliberate and visible.",
+    "",
+    "Without this file, pinning a digest converts a moving base into a frozen,",
+    "un-patched one - which is worse than not pinning at all."
+  ],
+  "extends": ["config:recommended"],
+
+  "schedule": ["before 6am on monday"],
+  "timezone": "Etc/UTC",
+  "prConcurrentLimit": 3,
+
+  "packageRules": [
+    {
+      "description": "Golden base images: group into one weekly PR and automerge digest-only bumps. A digest bump of an already-approved image is a STANDARD CHANGE - the golden image pipeline already gated it, so a second human review adds delay without adding assurance.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/s6peter/approved/**"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "golden base images",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "minimumReleaseAge": "0 days"
+    },
+    {
+      "description": "A MAJOR base image change (Python 3.14 -> 3.15) is a NORMAL CHANGE, not a digest bump. Never automerge: builder and runtime must move together or the venv's compiled extensions stop importing.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/s6peter/approved/**"],
+      "matchUpdateTypes": ["major", "minor"],
+      "automerge": false,
+      "addLabels": ["normal-change", "needs-review"]
+    },
+    {
+      "description": "Python dependencies stay hash-pinned. Renovate must regenerate hashes, and they are per Python version - see requirements.txt.",
+      "matchManagers": ["pip_requirements"],
+      "automerge": false,
+      "addLabels": ["dependencies"]
+    },
+    {
+      "description": "GitHub Actions are pinned to SHAs. Keep the version comment in sync so the diff stays readable.",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true,
+      "automerge": false
+    }
+  ],
+
+  "vulnerabilityAlerts": {
+    "description": "Security fixes bypass the weekly schedule. PCI-DSS 6.3.3 gives one month for critical patches; waiting for Monday burns a week of that for no reason.",
+    "schedule": ["at any time"],
+    "labels": ["security", "expedited"],
+    "prPriority": 10
+  },
+
+  "pip_requirements": { "fileMatch": ["(^|/)requirements\\.txt$"] },
+  "dockerfile": { "pinDigests": true }
+}
