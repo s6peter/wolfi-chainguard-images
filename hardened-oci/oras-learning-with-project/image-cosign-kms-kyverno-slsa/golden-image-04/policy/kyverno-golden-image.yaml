@@ -1,0 +1,274 @@
+# =============================================================================
+# Golden image admission control (Kyverno 1.18.x)
+#
+# This is the enforcement end of the golden image programme. The pipeline
+# decides what is trustworthy; these policies make that decision binding.
+# Without them the pipeline is documentation, not a control.
+#
+# Four gates, applied in order of cost:
+#   1. registry allowlist          - only approved/ can run
+#   2. digest reference required   - no mutable tags in production
+#   3. signature + attestations    - proves it passed OUR gate
+#   4. runtime hardening           - the half a Dockerfile cannot enforce
+#
+# Rollout: set failureAction: Audit, run for two weeks, review the policy
+# report, then switch to Enforce. Going straight to Enforce in a live cluster
+# is how you cause the outage that gets the whole programme cancelled.
+#
+# Controls: PCI-DSS 2.2 / 6.3.2 / 7.2, HIPAA 164.312(a)(1) + 164.312(c)(1),
+#           HITRUST 09.j, FedRAMP CM-2 / CM-7 / SI-7 / AC-6,
+#           NIST SP 800-190 s4.4-4.5, CIS Docker Benchmark s4.1 / s5.x
+#
+# Prerequisites:
+#   kubectl -n kyverno create secret generic golden-image-public-key \
+#     --from-file=cosign.pub=./cosign-keys/cosign.pub
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: golden-image-registry-allowlist
+  annotations:
+    policies.kyverno.io/title: Golden Image Registry Allowlist
+    policies.kyverno.io/category: Software Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Only images promoted into the approved/ namespace of the organisation
+      registry may run. The mirror/ namespace is quarantine and is explicitly
+      denied - an image that failed the gate physically cannot start.
+    compliance.internal/controls: "PCI-DSS-2.2, FedRAMP-CM-7, NIST-800-190-4.4"
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: only-approved-namespace
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      validate:
+        message: >-
+          Image must come from the golden image approved/ namespace.
+          Images in mirror/ are quarantined and have not passed the promotion gate.
+        foreach:
+          - list: "request.object.spec.[initContainers, ephemeralContainers, containers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "ghcr.io/perscoba/approved/*"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: golden-image-require-digest
+  annotations:
+    policies.kyverno.io/title: Require Digest Reference
+    policies.kyverno.io/category: Software Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Workloads must reference images by immutable digest. A tag can be
+      repointed after review, which breaks the guarantee that what was tested
+      is what is running - the core of SOX change integrity.
+    compliance.internal/controls: "SOX-ITGC, PCI-DSS-6.3.2, FedRAMP-CM-2, NIST-SI-7"
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: digest-required
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      validate:
+        message: >-
+          Image must be referenced by digest (image@sha256:...), not by tag.
+          Tags are mutable; digests are not.
+        foreach:
+          - list: "request.object.spec.[initContainers, ephemeralContainers, containers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "*@sha256:*"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: golden-image-verify-provenance
+  annotations:
+    policies.kyverno.io/title: Verify Golden Image Provenance
+    policies.kyverno.io/category: Software Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Requires the organisation signature plus all three attestations produced
+      by the golden image pipeline - SPDX SBOM, vulnerability scan, and the
+      signed gate decision. An image signed by Chainguard but never gated by us
+      is rejected: upstream provenance proves origin, ours proves review.
+    compliance.internal/controls: "PCI-DSS-6.3.2, FedRAMP-SI-7, NIST-SR-4, SLSA-L3"
+spec:
+  background: false
+  webhookConfiguration:
+    failurePolicy: Fail        # fail closed - an unavailable verifier denies
+    timeoutSeconds: 30
+  rules:
+    - name: verify-organisation-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/perscoba/approved/*"
+          failureAction: Enforce
+          required: true
+          mutateDigest: true
+          verifyDigest: true
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: "k8s://kyverno/golden-image-public-key"
+                    rekor:
+                      url: "https://rekor.sigstore.dev"
+
+    - name: verify-gate-decision-attestation
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/perscoba/approved/*"
+          failureAction: Enforce
+          required: true
+          attestations:
+            # The pipeline's own decision record, signed. This is the assertion
+            # that a specific gate, with specific thresholds, said APPROVED.
+            - predicateType: https://golden-image.example.bank/approval/v1
+              attestors:
+                - count: 1
+                  entries:
+                    - keys:
+                        publicKeys: "k8s://kyverno/golden-image-public-key"
+              conditions:
+                - all:
+                    - key: "{{ decision }}"
+                      operator: Equals
+                      value: APPROVED
+                    - key: "{{ findings.critical_fixable }}"
+                      operator: Equals
+                      value: 0
+
+    - name: verify-sbom-and-vulnerability-attestations
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/perscoba/approved/*"
+          failureAction: Enforce
+          required: true
+          attestations:
+            - predicateType: https://spdx.dev/Document
+              attestors:
+                - count: 1
+                  entries:
+                    - keys:
+                        publicKeys: "k8s://kyverno/golden-image-public-key"
+            - predicateType: https://cosign.sigstore.dev/attestation/vuln/v1
+              attestors:
+                - count: 1
+                  entries:
+                    - keys:
+                        publicKeys: "k8s://kyverno/golden-image-public-key"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: golden-image-runtime-hardening
+  annotations:
+    policies.kyverno.io/title: Golden Image Runtime Hardening
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Enforces the runtime half of the control. A distroless image with no
+      package manager still lets an attacker drop tooling into a writable
+      filesystem - readOnlyRootFilesystem is what makes "no shell" mean
+      something. runAsNonRoot with a numeric UID is CIS Docker 4.1 verified by
+      the kubelet rather than trusted from image metadata.
+    compliance.internal/controls: "CIS-Docker-4.1/5.3/5.12/5.25, NIST-800-190-4.5, FedRAMP-AC-6, HIPAA-164.312(a)(1)"
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-hardened-security-context
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      validate:
+        message: >-
+          Pod must set runAsNonRoot, drop ALL capabilities, disable privilege
+          escalation, use a read-only root filesystem, and set the
+          RuntimeDefault seccomp profile.
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  privileged: false
+                  capabilities:
+                    drop: ["ALL"]
+
+    - name: forbid-numeric-root-uid
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: [kube-system, kyverno]
+      validate:
+        message: "runAsUser must be a non-zero numeric UID (CIS Docker 4.1)."
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsUser): ">0"

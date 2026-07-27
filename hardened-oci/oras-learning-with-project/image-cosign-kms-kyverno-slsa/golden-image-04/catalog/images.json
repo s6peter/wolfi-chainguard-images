@@ -1,0 +1,95 @@
+{
+  "schema": "golden-image-catalog/v1",
+  "_comment": [
+    "Declarative source of truth for the golden image programme.",
+    "Adding, removing, or re-tiering an entry is a NORMAL CHANGE and requires CAB approval.",
+    "Bumping the resolved digest of an existing entry is a STANDARD CHANGE (pre-approved).",
+    "This distinction is what keeps weekly patching out of the change board.",
+    "SOX: this file plus its git history IS the authorised-base-image register."
+  ],
+  "defaults": {
+    "verify": {
+      "mode": "keyless",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "identity_regexp": "https://github\\.com/chainguard-images/.*"
+    },
+    "gate": {
+      "max_critical": 0,
+      "max_high": 0,
+      "max_secrets": 0,
+      "allow_unfixed": true,
+      "require_nonroot": true,
+      "forbid_privileged_ports": true
+    }
+  },
+  "images": [
+    {
+      "key": "python",
+      "upstream": "cgr.dev/chainguard/python:latest",
+      "mirror": "mirror/python",
+      "approved": "approved/python",
+      "tier": "tier-1",
+      "data_scope": ["pci-chd", "phi"],
+      "owner": "platform-base-images@example.bank",
+      "description": "Python runtime (distroless) for FHIR interop and risk models"
+    },
+    {
+      "key": "python-dev",
+      "upstream": "cgr.dev/chainguard/python:latest-dev",
+      "mirror": "mirror/python-dev",
+      "approved": "approved/python-dev",
+      "tier": "tier-3",
+      "data_scope": ["build-only"],
+      "owner": "platform-base-images@example.bank",
+      "description": "Python build toolchain. Build stage only - MUST NOT appear in a runtime stage.",
+      "gate": {
+        "max_critical": 0,
+        "max_high": 5,
+        "max_secrets": 0,
+        "allow_unfixed": true,
+        "require_nonroot": false,
+        "forbid_privileged_ports": true
+      }
+    },
+    {
+      "key": "jre",
+      "upstream": "cgr.dev/chainguard/jre:latest",
+      "mirror": "mirror/jre",
+      "approved": "approved/jre",
+      "tier": "tier-1",
+      "data_scope": ["pci-chd"],
+      "owner": "platform-base-images@example.bank",
+      "description": "Java runtime (distroless) for core banking and payments services"
+    },
+    {
+      "key": "static",
+      "upstream": "cgr.dev/chainguard/static:latest",
+      "mirror": "mirror/static",
+      "approved": "approved/static",
+      "tier": "tier-1",
+      "data_scope": ["pci-chd", "cui"],
+      "owner": "platform-base-images@example.bank",
+      "description": "Static runtime for Go/Rust binaries. No libc, no shell."
+    },
+    {
+      "key": "node",
+      "upstream": "cgr.dev/chainguard/node:latest",
+      "mirror": "mirror/node",
+      "approved": "approved/node",
+      "tier": "tier-2",
+      "data_scope": ["phi"],
+      "owner": "platform-base-images@example.bank",
+      "description": "Node runtime for member and patient portals"
+    },
+    {
+      "key": "aspnet-runtime",
+      "upstream": "cgr.dev/chainguard/aspnet-runtime:latest",
+      "mirror": "mirror/aspnet-runtime",
+      "approved": "approved/aspnet-runtime",
+      "tier": "tier-1",
+      "data_scope": ["phi"],
+      "owner": "platform-base-images@example.bank",
+      "description": "ASP.NET Core runtime for claims and policy administration"
+    }
+  ]
+}
