@@ -19,9 +19,23 @@
 #           HITRUST 09.j, FedRAMP CM-2 / CM-7 / SI-7 / AC-6,
 #           NIST SP 800-190 s4.4-4.5, CIS Docker Benchmark s4.1 / s5.x
 #
-# Prerequisites:
-#   kubectl -n kyverno create secret generic golden-image-public-key \
-#     --from-file=cosign.pub=./cosign-keys/cosign.pub
+# TRUST ANCHOR: keyless (Sigstore / OIDC)
+#
+# The pipeline signs keyless, so the trusted identity is the WORKFLOW, not a
+# key. There is no private key anywhere to steal, rotate, or escrow, and the
+# signing certificate records which workflow at which ref produced the
+# signature. NIST IA-5, SLSA build L3.
+#
+# The subject below is pinned to refs/heads/main deliberately. A signature
+# produced by a pull_request run carries @refs/pull/N/merge and therefore does
+# NOT verify - so an image built on an unmerged branch cannot be admitted, even
+# if someone pushes it to the approved/ namespace by mistake. That is a control,
+# not a limitation.
+#
+# Prerequisites: none. No Secret, no key material in the cluster.
+# For a KMS-signed variant instead, replace each keyless attestor with:
+#   - keys:
+#       publicKeys: "k8s://kyverno/golden-image-public-key"
 # =============================================================================
 
 apiVersion: kyverno.io/v1
@@ -62,7 +76,7 @@ spec:
                 all:
                   - key: "{{ element.image }}"
                     operator: NotEquals
-                    value: "ghcr.io/perscoba/approved/*"
+                    value: "ghcr.io/s6peter/approved/*"
 
 ---
 apiVersion: kyverno.io/v1
@@ -78,6 +92,31 @@ metadata:
       repointed after review, which breaks the guarantee that what was tested
       is what is running - the core of SOX change integrity.
     compliance.internal/controls: "SOX-ITGC, PCI-DSS-6.3.2, FedRAMP-CM-2, NIST-SI-7"
+    #
+    # KNOWN LIMITATION - measured, not assumed.
+    #
+    # This rule CANNOT fire for any image matched by golden-image-verify-provenance.
+    # verifyDigest:true makes Kyverno resolve and append the digest during image
+    # verification, so a manifest saying
+    #     ghcr.io/s6peter/approved/static:current
+    # reaches every validating webhook as
+    #     ghcr.io/s6peter/approved/static:current@sha256:399c8cb...
+    # and therefore satisfies the *@sha256:* condition. Setting mutateDigest:false
+    # does not prevent this; only verifyDigest:false would, at the cost of losing
+    # the digest binding check.
+    #
+    # Discovered by tests/admission-test.sh reporting "expected deny, got admit",
+    # then confirmed by dumping the post-admission object with -o json.
+    #
+    # The runtime property still holds: the container runs the exact bytes Kyverno
+    # verified. What is lost is that the MANIFEST does not record which digest was
+    # approved - so a GitOps review cannot see it, which is the SOX-relevant half.
+    #
+    # That control therefore belongs in the deployment repository's PR gate, where
+    # no mutation has happened yet:
+    #     kyverno apply policy/ --resource manifests/   # in CI, pre-merge
+    # This rule is retained because it still catches images NOT covered by a
+    # verifyImages rule, and it documents the intent.
 spec:
   validationFailureAction: Enforce
   background: true
@@ -136,16 +175,29 @@ spec:
               namespaces: [kube-system, kyverno]
       verifyImages:
         - imageReferences:
-            - "ghcr.io/perscoba/approved/*"
+            - "ghcr.io/s6peter/approved/*"
           failureAction: Enforce
           required: true
-          mutateDigest: true
+          # mutateDigest MUST stay false.
+          #
+          # With it true, Kyverno rewrites a tag reference to a digest in the
+          # MUTATING webhook, which runs before validating webhooks. The
+          # golden-image-require-digest policy then sees an already-digested
+          # image and admits it - so a workload manifest carrying a floating
+          # tag is silently accepted and the digest control is defeated by our
+          # own mutation. Found by tests/admission-test.sh, not by review:
+          # the tag case reported "expected deny, got admit".
+          #
+          # False means the manifest itself must carry the digest, which is what
+          # makes "what was reviewed is what runs" verifiable from the manifest.
+          mutateDigest: false
           verifyDigest: true
           attestors:
             - count: 1
               entries:
-                - keys:
-                    publicKeys: "k8s://kyverno/golden-image-public-key"
+                - keyless:
+                    subject: "https://github.com/s6peter/wolfi-chainguard-images/.github/workflows/golden-image.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
                     rekor:
                       url: "https://rekor.sigstore.dev"
 
@@ -160,7 +212,7 @@ spec:
               namespaces: [kube-system, kyverno]
       verifyImages:
         - imageReferences:
-            - "ghcr.io/perscoba/approved/*"
+            - "ghcr.io/s6peter/approved/*"
           failureAction: Enforce
           required: true
           attestations:
@@ -170,8 +222,11 @@ spec:
               attestors:
                 - count: 1
                   entries:
-                    - keys:
-                        publicKeys: "k8s://kyverno/golden-image-public-key"
+                    - keyless:
+                        subject: "https://github.com/s6peter/wolfi-chainguard-images/.github/workflows/golden-image.yml@refs/heads/main"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: "https://rekor.sigstore.dev"
               conditions:
                 - all:
                     - key: "{{ decision }}"
@@ -192,7 +247,7 @@ spec:
               namespaces: [kube-system, kyverno]
       verifyImages:
         - imageReferences:
-            - "ghcr.io/perscoba/approved/*"
+            - "ghcr.io/s6peter/approved/*"
           failureAction: Enforce
           required: true
           attestations:
@@ -200,14 +255,20 @@ spec:
               attestors:
                 - count: 1
                   entries:
-                    - keys:
-                        publicKeys: "k8s://kyverno/golden-image-public-key"
+                    - keyless:
+                        subject: "https://github.com/s6peter/wolfi-chainguard-images/.github/workflows/golden-image.yml@refs/heads/main"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: "https://rekor.sigstore.dev"
             - predicateType: https://cosign.sigstore.dev/attestation/vuln/v1
               attestors:
                 - count: 1
                   entries:
-                    - keys:
-                        publicKeys: "k8s://kyverno/golden-image-public-key"
+                    - keyless:
+                        subject: "https://github.com/s6peter/wolfi-chainguard-images/.github/workflows/golden-image.yml@refs/heads/main"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: "https://rekor.sigstore.dev"
 
 ---
 apiVersion: kyverno.io/v1

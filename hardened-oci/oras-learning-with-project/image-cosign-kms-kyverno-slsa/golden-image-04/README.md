@@ -190,7 +190,7 @@ evidence travels with the artifact rather than living in a separate system that
 has to be kept in sync. An auditor pulls the image and pulls its evidence:
 
 ```bash
-oras discover ghcr.io/perscoba/approved/python@sha256:… -o json
+oras discover ghcr.io/s6peter/approved/python@sha256:… -o json
 ```
 
 Retention is set to the longest applicable requirement — **7 years** (SOX).
@@ -257,7 +257,104 @@ because the failure mode is every pod being denied at admission.
 
 ---
 
-## 9. Files
+## 9. Proving the controls work
+
+A policy file that is never executed is an assumption, not a control. Two bugs
+shipped in `policy/kyverno-golden-image.yaml` that reading it could not catch:
+
+1. `imageReferences` named the wrong registry owner, so every rule **silently
+   passed** — the control did nothing at all.
+2. The attestors expected a static public key while the pipeline signs keyless,
+   so every rule would have **failed**, denying every pod in the cluster.
+
+One failed open, one failed closed. Neither is visible on inspection; both are
+obvious within seconds of running the policy. Hence
+[`tests/admission-test.sh`](tests/admission-test.sh):
+
+```bash
+./tests/admission-test.sh              # kind + Kyverno + the matrix, then tear down
+KEEP=1 ./tests/admission-test.sh       # leave the cluster up to inspect
+MODE=Audit ./tests/admission-test.sh   # observe instead of enforce
+
+# after merge, run against the real promoted images
+TEST_IMAGE_PREFIX=ghcr.io/s6peter TEST_SIGNER_REF=refs/heads/main \
+  ./tests/admission-test.sh
+```
+
+| Case | Expected | Control under test |
+|---|---|---|
+| `approved/` + digest + signed + hardened | **admit** | the happy path |
+| `cgr.dev/chainguard/static:latest` direct | deny | registry allowlist |
+| `mirror/` image | deny | quarantine namespace |
+| `approved/` by mutable tag | **admit** | see the finding below |
+| no `securityContext` | deny | runtime hardening |
+| writable root filesystem | deny | CIS 5.12 |
+| capabilities not dropped | deny | AC-6 least privilege |
+| `runAsUser: 0` | deny | CIS Docker 4.1 |
+| unsigned image in `approved/` | deny | SI-7 signature verification |
+
+Two things the harness does deliberately:
+
+**Server-side dry run.** `kubectl apply --dry-run=server` runs the entire
+admission chain — mutating webhooks, validating webhooks, live signature
+verification against the registry and Rekor — without creating pods, pulling
+images, or needing a schedulable node. Fast enough to run on every policy change.
+
+**The lab policy is generated, not forked.** The production YAML is rewritten in
+memory (registry prefix, signer ref, failureAction, excluded namespaces) and
+every substitution is printed. One source of truth, and the delta between what
+production enforces and what was tested is explicit rather than assumed.
+
+A denial is only counted as a pass if the message came from the *expected* rule.
+Otherwise a pod rejected for the wrong reason would look like a working control.
+
+Results are written to `evidence/admission-test-<timestamp>.json` — that file is
+the answer to "how do you know the control works?", which every assessor asks and
+few teams can answer with anything but a screenshot.
+
+### The finding: digest-in-manifest is not enforceable at admission
+
+The mutable-tag case was written expecting a denial. It was admitted. Dumping
+the post-admission object explained why:
+
+```
+manifest:          ghcr.io/s6peter/approved/static:current
+seen by webhooks:  ghcr.io/s6peter/approved/static:current@sha256:399c8cb...
+```
+
+`verifyDigest: true` makes Kyverno resolve and append the digest *as part of
+image verification*. Every validating webhook downstream therefore sees a
+reference that already contains `@sha256:`, so the digest condition is satisfied
+before it is ever evaluated. Setting `mutateDigest: false` does not change this —
+only `verifyDigest: false` would, and that costs you the digest binding check.
+
+Two halves, and only one is salvageable at admission:
+
+- **Runtime guarantee — intact.** The container runs the exact bytes Kyverno
+  verified. Nothing about this finding weakens that.
+- **Auditable guarantee — lost.** The manifest does not record which digest was
+  approved, so a GitOps reviewer cannot see it and the tag may resolve
+  differently at each admission. That is the SOX-relevant half.
+
+So the manifest-hygiene control belongs in the **deployment repository's PR
+gate**, where no mutation has happened yet:
+
+```bash
+kyverno apply policy/ --resource manifests/     # pre-merge, in CI
+```
+
+This is the general lesson, not a Kyverno quirk: a control placed downstream of
+a mutation cannot observe what the mutation erased. Worth checking wherever you
+have both mutating and validating rules over the same field.
+
+The admission policy is retained — it still catches images not covered by a
+`verifyImages` rule — with the limitation recorded inline so nobody re-litigates
+it. Test case 4b covers the CI-side check and skips with a clear message when the
+`kyverno` CLI is absent, rather than passing silently.
+
+---
+
+## 10. Files
 
 | Path | Purpose |
 |---|---|
@@ -266,6 +363,7 @@ because the failure mode is every pod being denied at admission.
 | [`scripts/golden-image.sh`](scripts/golden-image.sh) | The ten-stage pipeline |
 | [`policy/kyverno-golden-image.yaml`](policy/kyverno-golden-image.yaml) | Admission enforcement |
 | [`docs/compliance-mapping.md`](docs/compliance-mapping.md) | Control-by-control matrix |
+| [`tests/admission-test.sh`](tests/admission-test.sh) | kind + Kyverno admission test matrix |
 | `.github/workflows/golden-image.yml` | CI (repo root — required location) |
 
 ---
