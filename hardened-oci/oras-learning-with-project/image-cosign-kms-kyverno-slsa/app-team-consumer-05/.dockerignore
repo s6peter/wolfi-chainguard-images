@@ -1,0 +1,30 @@
+# A security control, not an optimisation. Without it a bare `COPY . .` sweeps
+# .git (full history, including secrets that were committed then "removed"),
+# .env files, and cloud credentials into a layer that is then pushed to the
+# registry and readable by anyone who can pull the image.
+.git
+.gitignore
+.github/
+ci/
+k8s/
+scripts/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.npmrc
+.netrc
+.aws/
+.kube/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+Dockerfile*
+.dockerignore
+*.md
+renovate.json

@@ -1,0 +1,174 @@
+# =============================================================================
+# TEMPLATE - the application team's build pipeline.
+#
+# This file does NOT run where it sits. To activate:
+#   cp ci/app-build.yml ../../../../../.github/workflows/app-build.yml
+# GitHub only reads workflows from .github/workflows/ on the default branch.
+#
+# It is kept here deliberately: dropping a second promoting workflow into a
+# live repo without being asked would start pushing app images to GHCR on the
+# next merge. Copy it when you actually want that.
+#
+# BUILD ONCE, DEPLOY MANY. The image is built exactly once and the resulting
+# digest is what moves through dev -> test -> staging -> prod. Rebuilding per
+# environment produces four different digests and destroys the guarantee that
+# what was tested is what shipped.
+#
+# Compliance: PCI-DSS 6.3.1/6.3.2, SOX ITGC change integrity, FedRAMP SI-7,
+#             NIST SP 800-190 s4.1, EO 14028 (SBOM + provenance).
+# =============================================================================
+name: app-build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hardened-oci/oras-learning-with-project/image-cosign-kms-kyverno-slsa/app-team-consumer-05/**'
+  pull_request:
+    paths:
+      - 'hardened-oci/oras-learning-with-project/image-cosign-kms-kyverno-slsa/app-team-consumer-05/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_DIR: hardened-oci/oras-learning-with-project/image-cosign-kms-kyverno-slsa/app-team-consumer-05
+  IMAGE: ghcr.io/${{ github.repository_owner }}/apps/example-api
+  COSIGN_VERSION: 2.4.1
+  SYFT_VERSION: 1.49.0
+  TRIVY_VERSION: 0.72.0
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write     # push to ghcr.io/<owner>/apps/*
+      id-token: write     # keyless signing via OIDC
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # --- GATE 1: the base image must be an approved one -------------------
+      # Runs BEFORE the build. There is no point compiling an app on a base
+      # image the cluster will refuse to run.
+      - name: Verify the base images are approved and signed
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/cosign \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          want=$(curl -fsSL "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign_checksums.txt" \
+                 | awk '$2=="cosign-linux-amd64"{print $1}')
+          echo "${want}  /tmp/cosign" | sha256sum -c - >/dev/null
+          sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          curl -fsSL -o /tmp/oras.tgz \
+            "https://github.com/oras-project/oras/releases/download/v1.2.2/oras_1.2.2_linux_amd64.tar.gz"
+          tar -xzf /tmp/oras.tgz -C /tmp oras && sudo install -m 0755 /tmp/oras /usr/local/bin/oras
+
+          cd "$APP_DIR"
+          # Extract every FROM digest and verify each one against the golden
+          # image pipeline's identity. A base image sneaked in from cgr.dev or
+          # mirror/ fails here rather than at admission, hours later.
+          grep -oE '^FROM ghcr\.io/[^ ]+@sha256:[0-9a-f]{64}' Dockerfile \
+            | awk '{print $2}' | sort -u | while read -r ref; do
+              echo "verifying ${ref}"
+              cosign verify \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/golden-image.yml@refs/heads/main" \
+                "$ref" >/dev/null
+              echo "  signature ok"
+            done
+
+          # Any FROM not under approved/ is a hard stop.
+          if grep -qE '^FROM (cgr\.dev|docker\.io|.*\/mirror\/)' Dockerfile; then
+            echo "::error::Dockerfile builds on a non-approved base image"; exit 1
+          fi
+
+      # --- GATE 2: manifest hygiene, before anything can mutate it ----------
+      - name: Check deployment manifests are digest-pinned
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR" && ./scripts/check-manifests.sh k8s
+
+      # --- build once -------------------------------------------------------
+      - name: Authenticate to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push (once)
+        id: push
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          TAG="${{ github.sha }}"
+          # PRs build but must not publish to the namespace the cluster trusts.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            IMAGE="ghcr.io/${{ github.repository_owner }}/apps-dryrun/example-api"
+            echo "::notice::pull request - publishing to apps-dryrun/"
+          fi
+          docker buildx build \
+            --build-arg VERSION="$(git describe --tags --always 2>/dev/null || echo 0.0.0)" \
+            --build-arg VCS_REF="${{ github.sha }}" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --sbom=true --provenance=mode=max \
+            --push -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}"   >> "$GITHUB_OUTPUT"
+          echo "### Built \`${IMAGE}@${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # --- scan the thing we actually built, by digest ----------------------
+      - name: Scan and SBOM
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tgz -C /tmp trivy && sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+          curl -fsSL -o /tmp/syft.tgz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/syft.tgz -C /tmp syft && sudo install -m 0755 /tmp/syft /usr/local/bin/syft
+
+          REF="${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}"
+          syft scan "registry:${REF}" -o spdx-json=/tmp/sbom.spdx.json -q
+          trivy image --scanners vuln,secret --severity HIGH,CRITICAL \
+            --exit-code 1 --format json --output /tmp/trivy.json "$REF"
+
+      # --- sign the digest, not the tag ------------------------------------
+      - name: Sign and attest
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          REF="${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "$REF"
+          cosign attest --yes --type spdxjson --predicate /tmp/sbom.spdx.json "$REF"
+          cosign attest --yes --type vuln     --predicate /tmp/trivy.json     "$REF"
+
+      # --- pin the digest into the manifest, then hand off to GitOps -------
+      - name: Emit deployable manifest
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          REF="${{ steps.push.outputs.image }}@${{ steps.push.outputs.digest }}"
+          sed -e "s|image: ghcr.io/.*/apps/example-api@sha256:0\{64\}|image: ${REF}|" \
+              -e "s|io.internal.build-run: \"REPLACED-BY-CI\"|io.internal.build-run: \"${{ github.run_id }}\"|" \
+              -e "s|io.internal.vcs-ref: \"REPLACED-BY-CI\"|io.internal.vcs-ref: \"${{ github.sha }}\"|" \
+              k8s/deployment.yaml > /tmp/deployment.rendered.yaml
+          ./scripts/check-manifests.sh /tmp   # the rendered output must pass too
+          echo "::notice::commit /tmp/deployment.rendered.yaml to the deployment repo to promote"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: app-build-evidence-${{ github.run_id }}
+          path: |
+            /tmp/sbom.spdx.json
+            /tmp/trivy.json
+            /tmp/deployment.rendered.yaml
+          retention-days: 90
+          if-no-files-found: warn

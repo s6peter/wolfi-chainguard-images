@@ -1,0 +1,169 @@
+# =============================================================================
+# GAP FOUND WHILE WRITING THIS DIRECTORY - read before deploying any app.
+#
+# golden-image-04/policy/kyverno-golden-image.yaml allows exactly one image
+# pattern to run:
+#
+#     ghcr.io/s6peter/approved/*
+#
+# That is correct for BASE images. But an application image is not a base image
+# - it lives at ghcr.io/s6peter/apps/example-api. Under the golden image policy
+# alone, the app team's own image is DENIED by golden-image-registry-allowlist,
+# and every app in the cluster fails to start.
+#
+# The golden image policy governs what you may BUILD ON. This file governs what
+# you may RUN. Both are needed; neither is sufficient alone. Apply this
+# alongside the golden image policies, not instead of them.
+#
+# Note the deliberate asymmetry in trust anchors:
+#   base images  -> signed by the golden image workflow on main
+#   app images   -> signed by the APP's own build workflow on main
+# Two separate identities. An app team cannot mint a base image, and the
+# platform team's signature cannot vouch for application code.
+#
+# Rollout: start with failureAction Audit, review the policy report, then
+# Enforce. Verify with ../../golden-image-04/tests/admission-test.sh.
+# =============================================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: app-image-registry-allowlist
+  annotations:
+    policies.kyverno.io/title: Application Image Allowlist
+    policies.kyverno.io/category: Software Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Application images may run only from the apps/ namespace of the
+      organisation registry. Combined with the golden image allowlist, the only
+      two things that can run in this cluster are reviewed base images and
+      signed application images built on them.
+    compliance.internal/controls: "PCI-DSS-2.2, FedRAMP-CM-7, NIST-800-190-4.4"
+spec:
+  validationFailureAction: Audit        # switch to Enforce after review
+  background: true
+  rules:
+    - name: only-org-namespaces
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [example-app]
+      validate:
+        message: >-
+          Image must come from ghcr.io/s6peter/apps/* (applications) or
+          ghcr.io/s6peter/approved/* (base images used directly, e.g. sidecars).
+        foreach:
+          - list: "request.object.spec.[initContainers, ephemeralContainers, containers][]"
+            deny:
+              conditions:
+                all:
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "ghcr.io/s6peter/apps/*"
+                  - key: "{{ element.image }}"
+                    operator: NotEquals
+                    value: "ghcr.io/s6peter/approved/*"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: app-image-verify-provenance
+  annotations:
+    policies.kyverno.io/title: Verify Application Image Provenance
+    policies.kyverno.io/category: Software Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Application images must be signed by their own build workflow and carry an
+      SBOM attestation. The base-image attestation chain is inherited from the
+      golden image programme; this proves the layers the app team added.
+    compliance.internal/controls: "PCI-DSS-6.3.2, FedRAMP-SI-7, NIST-SR-4, SLSA-L3"
+spec:
+  background: false
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 30
+  rules:
+    - name: verify-app-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [example-app]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/s6peter/apps/*"
+          failureAction: Audit          # switch to Enforce after review
+          required: true
+          # Keep false, for the reason documented at length on
+          # golden-image-require-digest: mutating the reference erases the
+          # evidence that the manifest itself carried the digest.
+          mutateDigest: false
+          verifyDigest: true
+          attestors:
+            - count: 1
+              entries:
+                # The APP's build workflow - a different identity from the
+                # golden image pipeline. Update the path if you rename the file.
+                - keyless:
+                    subject: "https://github.com/s6peter/wolfi-chainguard-images/.github/workflows/app-build.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: "https://rekor.sigstore.dev"
+
+    - name: verify-app-sbom
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [example-app]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/s6peter/apps/*"
+          failureAction: Audit
+          required: true
+          attestations:
+            - predicateType: https://spdx.dev/Document
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com/s6peter/wolfi-chainguard-images/.github/workflows/app-build.yml@refs/heads/main"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: "https://rekor.sigstore.dev"
+
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: app-image-base-must-be-approved
+  annotations:
+    policies.kyverno.io/title: Application Base Image Must Be Approved
+    policies.kyverno.io/category: Software Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      An application image must declare the approved base image it was built on
+      via the io.internal.base-image label. This is what makes the base-image
+      inventory answerable at runtime - "which pods are running on the Python
+      base we just found a CVE in?" - without rebuilding an SBOM index.
+    compliance.internal/controls: "NIST-CM-8, PCI-DSS-6.3.2, EO-14028"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: require-base-image-annotation
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [example-app]
+      validate:
+        message: >-
+          Pod must carry the io.internal.base-image annotation naming the
+          approved base digest it was built on.
+        pattern:
+          metadata:
+            annotations:
+              io.internal.base-image: "ghcr.io/s6peter/approved/*"
